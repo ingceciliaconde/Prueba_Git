@@ -1,0 +1,1311 @@
+---
+title: "Trabajo Práctico Nro.2"
+subtitle: "Análisis Inteligente de Datos"
+author: "Conde, M. Cecilia"
+date: "07/07/2024"
+output:
+  html_document:
+    toc: true
+    code_folding: show
+    toc_float: true
+    df_print: paged
+    theme: flatly
+    code_download: true
+  pdf_document:
+    toc: true
+---
+
+# General
+
+```{r Configuracion General}
+knitr::opts_chunk$set(echo = TRUE)
+# indica desde dónde instalar paquetes
+options(repos = c(CRAN = "http://cran.rstudio.com")) 
+require("knitr")
+# Seteo de directorio de trabajo
+setwd("C:/Users/mconde/Documents/AID/TP2")
+# Muestra directorio de trabajo
+getwd()
+```
+
+```{r Configuracion General2, message=FALSE, warning=FALSE}
+#librerías
+library(plotly)
+library(MASS)
+library(car)
+library(tidyverse)
+library(dplyr)
+library(reshape2)
+library(kableExtra)
+library(readxl)
+library(stats)
+library(BSDA)
+library(ggplot2)
+library(fastmap)
+library(latex2exp)
+library(vip) #importancia de las variables al modelos
+library(mvShapiroTest) #hacer shapiro en analisis de discriminante
+library(tidymodels)
+library(devtools)
+library(klaR)
+library(ggord)
+library(mlr)
+library(GGally)
+library(heplots) #varianza multivariada
+```
+
+# 1. Armar base de datos
+
+## 1.1 Lectura de datos
+
+-   Para este ejercicio práctico se utilizo el provisto por los docentes de AID. Este dataset tiene además de las variables original, algunas variables categorias armadas en función de la variable descripción y títulos. Asimismo se utiliza el archivo "barrios.xlsx", disponible en el portal de *datos abiertos del Gobierno de la Ciudad de Buenos Aires* para generar las variables Comuna y Zona.
+
+```{r Lectura de datos}
+#Leer datos
+entrenamiento <-read_excel("datos_tp2.xlsx")
+barrio<-read_excel("barrios.xlsx") #barrios portal datos abiertos CABA
+```
+
+## 1.2 Filtro de registros y atributos
+
+La base de datos para incluir solo aquellos donde:
+
+-   l1 - Nivel administrativo 1: Argentina.
+
+-   l2 - Nivel administrativo 2:Capital Federal.
+
+-   l3 -Nivel administrativos 3: **Elimino los registros que tengan NAN**
+
+-   property_type - Tipo de propiedad: PH.
+
+-   operation_type - Tipo de operación: Venta.
+
+-   Omita las columnas: start_date, end_date, created_on, title y description.
+
+```{r Filtro Datos}
+#filtro de datos
+entrenamiento_sin_columnas <- entrenamiento %>%select(-start_date,-end_date,-created_on, -title,-description)
+
+datos <- subset(entrenamiento_sin_columnas, l2 == "Capital Federal" & property_type  == "PH" & operation_type == "Venta" & !is.na(l3))
+
+```
+
+## 1.3 Generacion de Nuevas Varibles "Comuna" y "Zona"
+
+-   En el archvio barrio se agrupa las comunas en zonas en función de la siguiente información: Norte A = comunas 12-15, Este B = comunas 1-3, Sur C = comunas 4, 8, 9 y Oeste D = comunas 5-7, 10,11.
+
+-   Luego se une este archivo con el archivo que contiene las propiedas a traves de la columna barrio.
+
+```{r ASIGNAR BARRIOS Y ZONA}
+barrio$comuna1<- barrio$COMUNA/100000000000
+barrio$zona <- NA  # Inicializamos la columna zona con NA
+# Asignamos los valores correspondientes según las condiciones
+barrio$zona[barrio$comuna1 %in% c(12, 13, 14, 15)] <- "Norte A"
+barrio$zona[barrio$comuna1 %in% c(1, 2, 3)] <- "Este B"
+barrio$zona[barrio$comuna1 %in% c(4, 8, 9)] <- "Sur C"
+barrio$zona[barrio$comuna1 %in% c(5, 6, 7, 10, 11)] <- "Oeste D"
+barrio <- barrio[!is.na(barrio$comuna1), ]
+barrio<-barrio[c("BARRIO","comuna1", "zona")]
+head(barrio)
+```
+
+-   Se unen los archivo a través de la columna Barrio y l3
+
+```{r MERGE}
+# Realiza un join 
+datos$l3 <- toupper(datos$l3)
+datos_total <- merge(datos, barrio, by.x = "l3", by.y = "BARRIO")
+head(datos_total)
+```
+
+## 1.4 Generación de Muestra Aleatoria
+
+-   Muestra aleatoria de tamaño n = 500 utilizando como semilla los últimos tres dígitos de mi DNI: 28233**214.**
+
+```{r Sample}
+#muestra de datos con seed 214
+set.seed(214)
+df <-sample_n(datos_total, size=500, replace=FALSE)
+
+```
+
+# 2.Analisis Variables Cuantitativas según comuna de CABA:
+
+```{r Resumen}
+
+#datos duplicados
+any(duplicated(df)) 
+```
+
+```{r Resumen1}
+sum(is.na(df))# para saber cuantos na hay en la base de datos
+```
+
+```{r analisis de datos nulos}
+#prices nulos
+any(is.na(df$price))
+```
+
+```{r Eliminar outlier}
+# Crear una función para eliminar outliers de una columna
+mark_outliers_as_na <- function(x) {
+  Q1 <- quantile(x, 0.25, na.rm = TRUE)
+  Q3 <- quantile(x, 0.75, na.rm = TRUE)
+  IQR <- Q3 - Q1
+  lower_bound <- Q1 - 1.5 * IQR
+  upper_bound <- Q3 + 1.5 * IQR
+  x[x < lower_bound | x > upper_bound] <- NA
+  return(x)
+}
+# Especificar las columnas a las que se debe aplicar la función
+columns_to_modify <- c("surface_total", "surface_covered", "price", "rooms")
+# Aplicar la función a las columnas especificadas del dataframe, agrupado por comuna
+datos_marked <- df %>%
+  group_by(comuna1) %>%
+  mutate(across(all_of(columns_to_modify), mark_outliers_as_na)) %>%
+  ungroup() # Desagrupar al finalizar
+
+```
+
+```{r}
+#prices nulos
+any(is.na(datos_marked$price))
+
+```
+
+```{r DatosFaltantes1}
+# Filtrar el dataframe para eliminar filas con valores NA en precio
+df <- subset(datos_marked, !is.na(price))
+# Filtrar el dataframe para eliminar filas con NA en supericie total y superficie cubierta, el resto voy a imputar
+df <-subset(df,!is.na(surface_covered)& !is.na(!surface_total))
+```
+
+## 2.1. Imputar datos faltantes
+
+### 2.1.1 Imputar valores de 'bedrooms' y 'bathrooms'
+
+-   Se asume que la cantidad de ambientes es habitaciones+1 y la cantidad de habitaciones es ambientes-1
+
+```{r DatosFaltantes2}
+# Imputar valores de 'bedrooms' y 'rooms'
+df <- df %>%
+  mutate(bedrooms = ifelse(is.na(bedrooms), rooms - 1, bedrooms),
+         rooms = ifelse(is.na(rooms), bedrooms + 1, rooms))
+```
+
+### 2.1.2 Imputar otros valores faltantes
+
+-   Se imputan los datos faltantes de las otras variables númericas con la mediana de cada una de ellas, para agilizar el análisis.
+
+```{r DatosFaltantes3}
+df<- df %>% mutate_if(is.numeric, ~ ifelse(is.na(.), median(., na.rm = TRUE), .))
+colSums(is.na(df))
+```
+
+```{r dimensiones}
+#Luego de la limpieza se realiza las dimensiones
+dim(df)
+```
+
+## 2.2. Resumen
+
+Con todos los datos imputados, se procede a calcular las medidas de resumen para cada variable por comuna.
+
+Realice un descriptivo de las variables cuantitativas (numéricas) según comuna de CABA. Presente la información en forma tabular y conteniendo las siguientes medidas descriptivas: Cantidad de datos, mínimo, máximo, media, varianza y desviación estándar.
+
+-   Con todos los datos imputados, se procede a **calcular las medidas finales de resumen** para cada variable por comuna.
+
+```{r Summary}
+# Función para calcular estadísticas descriptivas
+resumen_descriptivo <- function(df) {
+  describe(df)
+}
+
+# Agrupar por comuna y aplicar la función de resumen descriptivo
+resumen_por_comuna <- df %>%
+  select(-lat,-lon,-luminoso,-reciclado,-expensas,-espectacular,-quincho,-terraza, -escalera, -galeria,)%>% #elimina estas columnas del analisis
+  select_if(is.numeric) %>% #numerica continua
+  group_by(comuna1) %>% #agrupa por comuna
+  summarise(across(where(is.numeric), 
+                   list(count = ~length(.),
+                        min = ~min(., na.rm = TRUE),
+                        max = ~max(., na.rm = TRUE),
+                        mean = ~mean(., na.rm = TRUE),
+                        var = ~var(., na.rm = TRUE),
+                        sd = ~sd(., na.rm = TRUE)),
+                   .names = "{col}_{fn}"))
+head(resumen_por_comuna)
+```
+
+# 3. Diferencia de Medias
+
+Seleccione una variable cuantitativa. Elija dos comunas, para estimar la diferencia de medias con un nivel de confianza del 95%. Realice las pruebas adecuadas para verificar los supuestos teóricos.
+
+-   Se desea conocer el intervalo de confianza del 95% de la diferencia de medias entre los precios de los PH entre la comuna 12 y 14, para ello se selecciona una **muestra aleatoria** de **20** PH para cada una de las comunas.
+
+-   Comunas 12 (Saavedra, Coghlan, Villa Urquiza y Villa Pueyrredón) y las comunas 14 (Palermo).
+
+```{r Muestreo Diferencia de medias}
+# Tamaño de la muestra
+set.seed(214)
+n=20
+comuna1 <- 12
+comuna2 <- 14
+
+# Tomar muestras aleatorias para cada comuna
+muestra_comuna1 <- sample(df$price[df$comuna1 == comuna1], n, replace=FALSE)
+muestra_comuna2 <- sample(df$price[df$comuna1 == comuna2], n, replace=FALSE)
+
+muestra_comuna1
+muestra_comuna2
+
+# Dataframe con las muestras
+data <- data.frame(
+  value = c(muestra_comuna1, muestra_comuna2),
+  group = factor(rep(c("comuna1", "comuna2"), c(length(muestra_comuna1), length(muestra_comuna2))))
+)
+
+```
+
+## 3.1 Análisis Exploratorio de Datos
+
+```{r}
+boxplot(value~group,data=data,xlab="Comuna",ylab="Precio",col="royalblue",border="darkblue", main= "Distribución de precios entre la comuna 12 y comuna 14",names = FALSE) # Desactivar las etiquetas de nombres automáticas
+
+# Agregar etiquetas personalizadas en el eje x
+axis(1, at = 1:2, labels = c("Comuna 12", "Comuna 14"))
+```
+
+## 3.2 Supuestos
+
+### 3.2.1 Normalidad
+
+-   Se prueba normalidad a través de qqplot y del test de Shapiro-Wilk.
+
+### Hipótesis de Normalidad
+
+-   Hipotesis Nula(Ho): Los datos siguen una distribución normal.
+
+-   Hipotesis Alternitva (H1) : Los datos siguen una distribución normal
+
+```{r sh.difmedia-m1}
+# Prueba de normalidad - Shapiro-Wilk
+shapiro.test(muestra_comuna1)
+```
+
+```{r sh.difmedia-m2}
+shapiro.test(muestra_comuna2)
+```
+
+```{r qqplot dif.medias}
+par(mfrow = c(1, 2))
+# Ajustar los tamaños de las etiquetas y títulos usando par
+par(cex.lab = 0.5, cex.main = 0.8, cex.axis = 0.5)
+qqPlot(muestra_comuna1, 
+       main = "QQ Plot de Muestra de Comuna 12",
+       xlab = "Cuantiles Teóricos",
+       ylab = "Cuantiles Muestra",
+       col = "blue",
+       pch = 19,
+       grid = TRUE)
+qqPlot(muestra_comuna2, 
+       main = "QQ Plot de Muestra de Comuna 14",
+       xlab = "Cuantiles Teóricos",
+       ylab = "Cuantiles Muestra",
+       col = "blue",
+       pch = 19,
+       grid = TRUE)
+```
+
+-   No se rechaza la hipotesis nula. Hay evidencia suficiente que los datos siguen una distribución normal. *Se cumple el supuesto de normalidad*.
+
+### 3.2.2 Homocedasticidad
+
+-   Se realizan el test de Levene para analizar la homogenidad varianzas.
+
+### Hipótesis sobre las varianzas poblacionales
+
+-   **Hipótesis Nula (H0)**: Las varianzas son iguales.
+
+-   **Hipótesis Alternativa (H1)**: Las varianzas son diferentes
+
+```{r Levene dif.medias, warning=FALSE}
+
+# test de Levene
+leveneTest(value ~ group, data = data)
+```
+
+-   El test de Levene arroja un p-valor de 0.5276, mayor al 𝝰 (valor de significancia) establecido. Por lo cual no se rechaza la hipótesis que la varianzas son homogeneas. *Se cumple el supuesto de homogeneidad de varianzas*
+
+### 3.2.2 Independencia de las observaciones
+
+Viene determinada principalmente por el diseño del estudio. Seleccionar muestras de forma aleatoria es una estrategia que permite que las observaciones sean independientes entre sí.
+
+## 3.3 Intervalo de Confianza del 95%
+
+-   Dado que se cumplen con los supuestos, se procede a calcular el intervalo de confianza.
+
+```{r IC95}
+# Intervalo de confianza del 95% para la diferencia de medias
+resultado <- t.test(muestra_comuna1, muestra_comuna2, 
+                    mu = 0, 
+                    alternative = "two.sided", 
+                    var.equal = TRUE,  # Asumiendo varianzas iguales
+                    conf.level = 0.95)
+
+print(resultado$conf.int)
+```
+
+-   Con un intervalo de confianza del 95%, la diferencia entre las medias de los precios de los PH en las comunas 12 y 14 se encuentra entre **-63509.85 y 29400.85 \$**. Dado que este intervalo incluye el valor cero, podemos concluir que no existe una diferencia estadísticamente significativa en el precio medio de los PH entre ambas comunas.
+
+# 4. Test de Hipótesis de Diferencia de Medias
+
+Según el resultado obtenido en el punto 3.- realice un test de hipótesis apropiado para determinar la diferencia de medias de la variable en estudio. Trabaje con una significación del 5%. Presente el planteo de hipótesis adecuado, la resolución y la decisión a tomar.
+
+## 4.1 Planteo de Hipótesis:
+
+$$
+\begin{aligned}
+&\text{Hipótesis Nula (Ho)}: \mu_{12} - \mu_{14} = 0 \\
+&\text{Hipótesis Alternativa (H1)}: \mu_{12} - \mu_{14} \neq 0 \\
+\end{aligned}
+$$
+
+-   La hipotesis nula plantea que no hay diferencia en el precio promedio entre los PH de la comuna 12 y los ph de la comuna 14.
+
+-   Se realiza un test de diferencia de medias con t-test.
+
+```{r t-Test}
+
+# Intervalo de confianza del 95% para la diferencia de medias
+resultado <- t.test(muestra_comuna1, muestra_comuna2, 
+                    mu = 0, 
+                    alternative = "two.sided", 
+                    var.equal = TRUE,  # Asumiendo varianzas iguales
+                    conf.level = 0.95)
+
+print(resultado)
+```
+
+-   Asumiendo un nivel de significa de 5%, **NO se rechaza la hipotesis nula**. No hay evidencia suficiente para decir que el precio de los PH de la comuna 12 y 14 sean diferentes.
+
+# 5. Prueba de Mann
+
+Elija dos comunas donde no se cumplan los supuestos necesarios para hacer diferencia de medias y aplique la prueba de Mann Whitney con una significación del 5%.
+
+-   Se desea conocer si hay diferencia entre la superficie cubierta dentro de las comunas de CABA, por ello se seleccionaron al azar 8 PH de la comuna 7 (Flores y Parque Chacabuco) y 8 ph de la comuna 4 (Parque Patricios, Barracas, Nueva Pompeya y Boca).
+
+```{r Muestreo prueba Mann}
+# Tamaño de la muestra
+set.seed(214)
+n=8
+comuna1 <- 7
+comuna2 <- 4
+# Tomar muestras aleatorias para cada comuna
+muestra_comuna1 <- sample(df$surface_covered[df$comuna1 == comuna1], n, replace=FALSE)
+muestra_comuna2 <- sample(df$surface_covered[df$comuna1 == comuna2], n, replace=FALSE)
+
+muestra_comuna1
+muestra_comuna2
+
+# Dataframe con las muestras
+data <- data.frame(
+  value = c(muestra_comuna1, muestra_comuna2),
+  group = factor(rep(c("comuna7", "comuna4"), c(length(muestra_comuna1), length(muestra_comuna2))))
+)
+
+```
+
+## 5.1 Análisis Exploratorio de Datos
+
+```{r}
+boxplot(value~group,data=data,xlab="Comuna",ylab="Precio",col="lightgreen",border="darkgreen", main= "Distribución de superficie cubierta entre las comunas 7 y 4",names = FALSE) # Desactivar las etiquetas de nombres automáticas
+
+# Agregar etiquetas personalizadas en el eje x
+axis(1, at = 1:2, labels = c("Comuna 7", "Comuna 4"))
+```
+
+## 5.2 Supuestos
+
+### 5.2.1 Normalidad
+
+-   Se prueba normalidad a través de qqplot y el test de Shapiro-Wilk.
+
+### Hipótesis de Normalidad
+
+-   Hipotesis Nula(Ho): Los datos siguen una distribución normal.
+
+-   Hipotesis Alternitva (H1) : Los datos siguen una distribución normal.
+
+```{r Shapiro-Manns} # Prueba de normalidad - Shapiro-Wilk}
+shapiro.test(muestra_comuna1)
+```
+
+```{r}
+shapiro.test(muestra_comuna2)
+```
+
+```{r}
+par(mfrow = c(1, 2))
+# Ajustar los tamaños de las etiquetas y títulos usando par
+par(cex.lab = 0.5, cex.main = 0.8, cex.axis = 0.5)
+qqPlot(muestra_comuna1, 
+       main = "QQ Plot de Muestra de Comuna 10",
+       xlab = "Cuantiles Teóricos",
+       ylab = "Cuantiles Muestra",
+       col = "blue",
+       pch = 19,
+       grid = TRUE)
+qqPlot(muestra_comuna2,
+       main = "QQ Plot de Muestra de Comuna 4",
+       xlab = "Cuantiles Teóricos",
+       ylab = "Cuantiles Muestra",
+       col = "blue",
+       pch = 19,
+       grid = TRUE)
+```
+
+-   Se rechaza la hipotesis nula de normalidad. *No se cumple el supuesto de normalidad.*
+
+### 5.2.2. Homocedasticidad
+
+-   Se realiza el test de Levene para analizar la homogenidad varianzas.
+
+```{r Levene_Mann}
+# test de Levene 
+leveneTest(value ~ group, data = data)
+```
+
+-   Con p-valor de 0.1529, mayor al nivel de significancia (0.05), no se rechaza la hipotesis que la varianzas son homogeneas. *Se cumple el supuesto de homocedasticidad*
+
+## 5.3 Test de Mann
+
+-   Dado que no se cumple el supuesto de normalidad, se procede hacer un análisis no parametrico, Test de Mann.
+
+### Hipótesis
+
+$$
+\begin{aligned}
+&\text{Hipótesis Nula (Ho)}: \theta_A = \theta_C \\
+&\text{Hipótesis Alternativa (H1)}: \theta_A \neq \theta_C
+\end{aligned}
+$$
+
+La hipótesis nula plantea que la cantidad de ambientes en las propiedades en las comunas 10 y 15 son iguales, mientras que la hipótesis alternativa plantea que son distintas.
+
+```{r Mann Whitney, warning=FALSE}
+# Realizar la prueba de Mann-Whitney
+resultado_mann_whitney <- wilcox.test(muestra_comuna1, muestra_comuna2, alternative = "two.sided")
+resultado_mann_whitney
+
+```
+
+-   El p-value \>= 0.05, por lo tanto, no se rechaza la hipótesis nula. No hay suficiente evidencia para concluir que la superficie cubierta de los PH difiere entre las comunas 7 y 4.
+
+# 6. Anova
+
+Seleccione 4 comunas y tome muestras adecuadas para realizar el análisis de la varianza para una variable cuantitativa elegida a su criterio. Verifique los supuestos necesarios. Trabaje con una significación del 5%. En caso de que no se verifiquen los supuestos necesarios aplique una prueba alternativa.
+
+-   Se desea determinar si existe una diferencia en el precio medio de los PH en la Zona Norte A. Para ello**, se seleccionaron aleatoriamente 15 PH** de cada una de las Comunas 12, 13, 14 y 15, todas pertenecientes a dicha zona.
+
+```{r Muestra Anova}
+# Tamaño de la muestra
+set.seed(214)
+n=15
+comuna1 <- 12
+comuna2 <- 13
+comuna3 <- 14
+comuna4 <- 15
+#muestras aleatorias para cada comuna
+muestra_comuna1 <- sample(df$price[df$comuna1 == comuna1], n, replace=FALSE)
+muestra_comuna2 <- sample(df$price[df$comuna1 == comuna2], n, replace=FALSE)
+muestra_comuna3 <- sample(df$price[df$comuna1 == comuna3], n, replace=FALSE)
+muestra_comuna4 <- sample(df$price[df$comuna1 == comuna4], n, replace=FALSE)
+
+# Dataframe con las muestras
+data <- data.frame(
+  value = c(muestra_comuna1, muestra_comuna2, muestra_comuna3, muestra_comuna4),
+  group = factor(rep(c("comuna 12", "comuna 13", "comuna 14", "comuna 15"),
+                     c(length(muestra_comuna1),length(muestra_comuna2),length(muestra_comuna3),length(muestra_comuna4))))
+)
+```
+
+## 6.1 Análisis Exploratorio de Datos
+
+```{r}
+boxplot(value~group,data=data,xlab="Comuna",ylab="Precio",col="royalblue",border="darkblue", main= "Distribución de precios entre las comuna dee Norte A",names = FALSE) # Desactivar las etiquetas de nombres automáticas
+
+# Agregar etiquetas personalizadas en el eje x
+axis(1, at = 1:4, labels = c("12", "13", "14", "15"))
+```
+
+Se observa que la comuna 15 podría no cumplir con una distribucion normal, no obstante se procede analizar los supuestos gráficamente y analíticamente.
+
+## 6.2 Supuestos
+
+### 6.2.1 Normalidad
+
+-   Se analiza normalidad a través de qqplot y la prueba de Shapiro-Wilk.
+
+### Hipótesis de Normalidad
+
+-   Hipotesis Nula(Ho): Los datos siguen una distribución normal.
+
+-   Hipotesis Alternitva (H1) : Los datos siguen una distribución normal
+
+```{r Shapiro-Anova}
+# Realizar el test de Shapiro-Wilk para cada grupo
+shapiro_results <- data %>%
+  group_by(group) %>%
+  summarise(
+    shapiro_p_value = shapiro.test(value)$p.value
+  )
+
+# Mostrar los resultados del test de Shapiro-Wilk en una tabla
+kable(shapiro_results, 
+      caption = "Resultados del Test de Shapiro-Wilk por Comuna",
+      format = "html",  
+      align = 'c',  
+      row.names = FALSE,  
+      digits = 3)  # Número de dígitos decimales
+      
+```
+
+```{r qqplot Anova}
+# Configurar la ventana gráfica para 4 gráficos en una sola ventana
+par(mfrow = c(2, 2), mar = c(1, 1, 1, 1), oma = c(0, 0, 0, 0))  # Ajustar márgenes y espacio exterior
+
+# Ajustar los tamaños de las etiquetas y títulos usando par
+par(cex.lab = 0.5, cex.main = 0.8, cex.axis = 0.5)
+
+qqPlot(muestra_comuna1, 
+       main = "QQ Plot de Muestra de Comuna 12",
+       xlab = "Cuantiles Teóricos",
+       ylab = "Cuantiles Muestra",
+       col = "blue",
+       pch = 19,
+       grid = TRUE)
+
+qqPlot(muestra_comuna2, 
+       main = "QQ Plot de Muestra de Comuna 13",
+       xlab = "Cuantiles Teóricos",
+       ylab = "Cuantiles Muestra",
+       col = "blue",
+       pch = 19,
+       grid = TRUE)
+qqPlot(muestra_comuna3, 
+       main = "QQ Plot de Muestra de Comuna 14",
+       xlab = "Cuantiles Teóricos",
+       ylab = "Cuantiles Muestra",
+       col = "blue",
+       pch = 19,
+       grid = TRUE)
+
+qqPlot(muestra_comuna4, 
+       main = "QQ Plot de Muestra de Comuna 15",
+       xlab = "Cuantiles Teóricos",
+       ylab = "Cuantiles Muestra",
+       col = "blue",
+       pch = 19,
+       grid = TRUE)
+```
+
+-   Dado que se estable un nivel de significancia del 5%, No se rechaza la hipótesis nula de normalidad. Hay evidencia suficiente que los datos siguen una distribución normal. *Se cumple el supuesto.*
+
+### 6.2.2 Homocedasticidad
+
+-   Se realizan el test de Levene para analizar la homogenidad varianzas.
+
+### Hipótesis sobre las Varianzas Poblacionales
+
+La hipótesis nula (H0​) de la prueba de Levene es que las varianzas son iguales en todos los grupos que se comparan. En contraste, la hipótesis alternativa (H1​) sugiere que al menos una de las varianzas difiere de las otras.
+
+$$
+\begin{aligned}&\text{Hipótesis Nula (H0)}: \sigma^2_1 = \sigma^2_2 = \cdots = \sigma^2_k \\&\text{Hipótesis Alternativa (H1)}: \text{Al menos una varianza es diferente}\end{aligned}
+$$
+
+```{r Levene Anova}
+
+# test de Levene
+leveneTest(value ~ group, data = data)
+```
+
+-   El test de Levene arroja un p-valor de 0.7781, que es mayor al nivel de significancia establecido (α), por lo cual no se rechaza la hipótesis nula de que las varianzas son homogéneas. *Se cumple el supuesto de homogeneidad de varianzas.*
+
+### 6.2.2 Independencia de las observaciones
+
+-   Viene determinada principalmente por el diseño del estudio. Seleccionar muestras de forma aleatoria es una estrategia que permite que las observaciones sean independientes entre sí.
+
+-   Con los supuestos validados se procede a realizar ANOVA, y en caso de ser necesario Tukey.
+
+## 6.3 ANOVA y Tukey
+
+### **Hipótesis para Análisis de Varianza (ANOVA)**
+
+**Hipótesis Nula (H0):** Todas las medias poblacionales son iguales. $$
+\
+H_0: \mu_1 = \mu_2 = \mu_3 = \mu_4
+\
+$$**Hipótesis Alternativa (H1):** Al menos una media poblacional es diferente de las demás. $$
+\
+H_1: \text{Al menos una } \mu_i \text{ es distinta de las otras}
+\
+$$
+
+**Nivel de Significación**
+
+Se utilizará un nivel de significancia de $\alpha = 0.05$.
+
+```{r anova}
+anova <- aov(data$value ~ data$group)
+summary(anova)
+```
+
+```{r Chequeo de normalidad de residuos}
+shapiro.test(residuals(anova)) #Chequeo de normalidad de residuos
+```
+
+-   Se rechaza la hipótesis nula del ANOVA, al menos un par de medias difiere entre sí. Para identificar específicamente cuáles medias difieren, se procederá a realizar el test de Tukey.
+
+```{r Tukey}
+#tukey
+tukey_result <- TukeyHSD(anova)
+tukey_result
+```
+
+```{r plot Tukey}
+
+# Plot 
+plot(tukey_result, las = 1, cex.axis = 0.4, col = "blue")
+
+
+```
+
+-   El precio medio de los PH de la comuna 13 (Colegiales, Belgrano y Nuñez) difiere significativamente con respecto al precio medio de la comuna 15 (Chacarita, Paternal, Villa Crespo, Villa Ortuzar, Agronomia). Por otro lado, no se encontraron diferencias significativas entre las demás comunas.
+
+# 7. Regresión Lineal Simple
+
+Realice el análisis de regresión lineal simple tomando como variable explicada el precio de la propiedad. Elija otra variable a su criterio como explicativa. Tome los barrios que considere con valores similares en la variable explicada. Teniendo en cuenta la cantidad de datos seleccione una muestra aleatoria de tamaño grande 𝑛 \> 30. Separe el conjunto de datos en entrenamiento (80%) y prueba (20%). Verifique los supuestos necesarios. Presente un informe analizando el reporte.
+
+## 7.1 Análisis Exploratorio de Datos
+
+-   El análisis de datos se realiza para determinar que barrios voy a analizar.
+
+```{r}
+
+# Crear el gráfico de barras
+ggplot(resumen_por_comuna, aes(x = reorder(comuna1, -surface_covered_mean), y = surface_covered_mean)) +
+  geom_bar(stat = "identity", width = 0.7) +  # valores basados en 'mean_surface'
+  geom_errorbar(aes(ymin = surface_covered_mean - surface_covered_sd, ymax = surface_covered_mean + surface_covered_sd), width = 0.2) +
+  labs(title = "Media de Superficie Cubierta por Comuna",
+       x = "Comuna",
+       y = "Media de Superficie Cubierta") +
+  theme_minimal()
+    # Rotar etiquetas de x para mejor lectura
+```
+
+Vamos analizar los barrios de la comuna 12, dado que la variabilidad en precio es una de las menores dentro de esa comuna.
+
+```{r}
+# Filtrar los datos para mostrar solo los barrios de la comuna 12
+df_comuna12 <- df %>% filter(comuna1 == 12)
+
+# Crear el gráfico de dispersión para la comuna 12
+ggplot(data = df_comuna12, aes(x = surface_covered, y = price, color = comuna1)) +
+  geom_point(alpha = 0.6, size = 3) +
+  labs(title = "Gráfico de dispersión: Precio vs Superficie Cubierta (Barrios Comuna 12)",
+       x = "Superficie Cubierta",
+       y = "Precio") +
+  theme_minimal()
+```
+
+```{r Filtro df_rs}
+# Filtrar las comunas con media y desvio similar
+comuna_interes <- 12
+df_xy <- df_comuna12 
+```
+
+```{r df_train y test rs}
+set.seed(214)
+#setear la semilla
+
+df_rs <- df_xy %>% select(c('l3','price','surface_covered'))
+
+# Dividir los datos en conjuntos de entrenamiento y prueba
+df_split <- initial_split(df_rs,prop = 0.8)#para conservar la proporción de las clases
+
+# Crear los conjuntos de entrenamiento y prueba
+df_train <- df_split %>%training()
+df_test <- df_split %>%testing()
+
+# Número de datos en test y train
+paste0("Total del dataset de entrenamiento: ", nrow(df_train))
+```
+
+```{r}
+paste0("Total del dataset de testeo: ", nrow(df_test))
+```
+
+## Modelo Estadístico
+
+$$
+\LARGE Y_{i}= \beta_{0} + \beta_{1} X_1 + \varepsilon_i
+$$
+
+Donde:
+
+\- $Y_i$ es el precio promedio para la superficie $i$
+
+\- $\beta_0$ es la ordenada al origen o intercepto
+
+\- $\beta_1$ es el coeficiente de la variable independiente $X_1$ , cuanto aumenta el precio cada aumento unitario de superficie cubierta.
+
+\- $X_1$ es la variable independiente , en este caso "superficie cubierta"
+
+\- $\varepsilon_i$ es el término de error
+
+-   Se corre el modelo y así se obtienen los residuales para el análisis de los supuestos, si los supuesto se cumplen luego se concluye sobre el modelo.
+
+```{r Modelo de Regresion Simple}
+
+modelo1<-lm(`price` ~ `surface_covered`,data=df_train)
+
+```
+
+## 7.2 Supuestos
+
+-   Calculamos residuales y predichos para analizar homogenidad de varianzas y normalidad.
+
+```{r rls residuos, warning=FALSE}
+#Calculamos los residuos y los predichos
+e<-resid(modelo1) # residuos
+re<-rstandard(modelo1) #residuos estandarizados
+pre<-predict(modelo1) #predichos
+res<-cbind(df$`surface_covered`,df$`price`,pre,e,round(re,2))
+#head(res)
+```
+
+```{r}
+#Supuestos
+par(mfrow = c(1, 2))
+plot(pre, re, xlab="Predichos", ylab="Residuos estandarizados",main="Grafico de dispersion de RE vs PRED" )
+abline(0,0)
+qqPlot(e,main = "QQ Plot de Ph",
+       xlab = "Cuantiles Teóricos",
+       ylab = "Cuantiles Muestra",
+       col = "blue",
+       pch = 19,
+       grid = TRUE)
+```
+
+```{r}
+shapiro.test(e)
+```
+
+-   No se observa un patrón en el gráfico de dispersión de residuos vs. valores predichos, por lo que se puede asumir *homogeneidad en las varianzas*. Por otro lado, el test de Shapiro-Wilks arroja un p-valor mayor al nivel de significancia establecido, por lo cual no se rechaza la hipótesis nula. *Esto indica que los datos siguen una distribución normal*.
+
+## 7.3. Análisis de modelo
+
+-   Dado que se cumplen los supuestos procedo analizar la regresión.
+
+```{r}
+summary(modelo1)
+```
+
+Se observa una relación lineal significativa entre la superficie cubierta y el precio (p-valor \< alfa). Además, el 60,64% de la variabilidad del precio puede ser explicada por la superficie cubierta.
+
+## 7.4 Evaluamos el Modelo
+
+```{r}
+pred_m1 <- modelo1 |>  
+           predict(df_test) |> 
+            bind_cols(df_test)
+pred_m1
+```
+
+Cálculo del RMSE ( *Root Mean Squared Error* o Error Cuadrático Medio)
+
+```{r}
+# Evaluamos en df_test
+
+rmse_result <- pred_m1 %>%
+  metrics(truth = "surface_covered", estimate = "...1") %>%
+  filter(.metric == "rmse")
+
+# Mostrar el resultado del RMSE
+print(rmse_result)
+```
+
+```{r}
+glance(modelo1)
+```
+
+# 8. Análisis de Regresión múltiple
+
+Realice el análisis de regresión múltiple tomando como variable explicada el precio de la propiedad. Elija dos o más variables a su criterio como explicativas. Tome los barrios que considere con valores similares en la variable explicada. Teniendo en cuenta la cantidad de datos seleccione una muestra aleatoria de tamaño grande 𝑛 \> 30. Separe el conjunto de datos en entrenamiento (80%) y prueba (20%). Verifique los supuestos necesarios. Presente un informe analizando el reporte.
+
+## 8.1 Analisis exploratorio de datos
+
+-   Con el objetivo de mejorar el modelo del punto 7, se analiza la correlación deotras variables explicatorias. Este análisis permite elegir variables que no esten correlacionada con la superficie cubierta, evitando multicolinealidad.
+
+```{r}
+
+set.seed(214)
+#setear la semilla
+
+df_rm<- df_xy %>% select(c('l3','price','surface_covered','rooms','bathrooms', 'bedrooms', 'surface_total'))
+
+# Dividir los datos en conjuntos de entrenamiento y prueba
+df_split <- initial_split(df_rm,prop = 0.8) #para conservar la proporción de las clases
+
+# Crear los conjuntos de entrenamiento y prueba
+df_train_rm <- df_split %>%training()
+df_test_rm <- df_split %>%testing()
+
+# Número de datos en test y train
+paste0("Total del dataset de entrenamiento: ", nrow(df_train))
+
+
+
+```
+
+```{r}
+
+
+ggpairs(df_train_rm, 
+        legend = 1, 
+        columns = 3:7, diag = list(continuous = "blankDiag"))+
+  theme(legend.position = "bottom")
+```
+
+-   Se agrega la variable bathrooms al modelo, ya que es la que esta menos correlacionada con la variable superficie cubierta.
+
+    ## Modelo Estadístico
+
+    $$ \LARGE Y_{i}= \beta_{0} + \beta_{1} X_1 + \beta_{2} X_2 +\varepsilon_i $$
+
+    Donde:
+
+    \- $Y_i$ es el precio promedio para la superficie $i$
+
+    \- $\beta_0$ es la ordenada al origen o intercepto
+
+    \- $\beta_1$ es el coeficiente de la variable independiente $X_1$ , cuanto aumenta el precio cada aumento unitario de superficie cubierta.
+
+    \- $\beta_2$ es el coeficiente de la variable independiente $X_2$ , cuanto aumenta el precio cada aumento unitario de baño.
+
+    \- $X_1$ es la variable independiente , en este caso "superficie cubierta"
+
+-   \- $X_2$ es la variable independiente , en este caso "baño"
+
+    \- $\varepsilon_i$ es el término de error
+
+```{r}
+modelo2<-lm(`price` ~ `surface_covered`+ `bathrooms`, 
+            data=df_train_rm)
+```
+
+## 8.2. Supuestos
+
+Calculamos residuales y predichos para analizar homogenidad de varianzas y normalidad.
+
+```{r}
+#Calculamos los residuos y los predichos
+e_m2<-resid(modelo2) # residuos
+re_m2<-rstandard(modelo2) #residuos estandarizados
+pre_m2<-predict(modelo2) #predichos
+res_m2<-cbind(df$`surface_covered`, df$`lon`, df$`price`,pre_m2,e_m2,round(re_m2,2))
+head(res_m2)
+```
+
+```{r}
+par(mfrow = c(1, 2))
+plot(pre_m2, re_m2, xlab="Predichos", ylab="Residuos estandarizados",main="RE vs PRED" )
+abline(0,0)
+qqPlot(e_m2,main = "QQ Plot de Ph",
+       xlab = "Cuantiles Teóricos",
+       ylab = "Cuantiles Muestra",
+       col = "blue",
+       pch = 19,
+       grid = TRUE)
+```
+
+```{r}
+shapiro.test(resid(modelo2))
+```
+
+-   No se observa un patrón en el gráfico de dispersion de residuos vs. predichos, por lo cual se puede asumir homegeneidad en las varizanas. Por otro lado el test de shapiro arroja un p-valor por mayor 0,05 por lo cual no se rechaza ho, asumiendo normalidad.
+
+## 8.3 Análisis del modelo
+
+-   Dado que se cumplen los modelos se procede a analizar el modelo.
+
+```{r}
+summary(modelo2)
+```
+
+-   La variable bathrooms no tiene una relacion lineal con el precio (p- valor \> nivel de significancia=0.05), por lo cual agregarla en el modelo no lo mejora ya que el R2 es igual al modelo del punto 7.
+
+-   Por otro lado, el R2R\^2R2 ajustado empeora (RLS=0.5948 vs RLM= 0.5825), ya que esta medida penaliza la inclusion de variables irrelevantes.
+
+```{r}
+pred_rm <- modelo2 |>  
+           predict(df_test_rm) |> 
+           bind_cols(df_test_rm)
+pred_rm
+```
+
+## 8.4 Evaluamos el Modelo
+
+```{r}
+rmse_result_rm <- pred_rm %>%
+  metrics(truth = "price", estimate = "...1") %>%
+  filter(.metric == "rmse")
+
+print(rmse_result_rm)
+```
+
+```{r}
+glance(modelo2)
+```
+
+## 8.5 Importancia de las variables en el modelo
+
+```{r}
+importancia <- vip(modelo2)
+
+plot(importancia)
+```
+
+# 9. Analisis discriminante linear (LDA)
+
+Elija dos comunas para realizar el análisis discriminante (pueden ser las utilizadas en los puntos anteriores u otros). Codifique la variable comuna. Aplique el análisis discriminante. Interprete los resultados.
+
+-   Para este análisis, se utilizaron las comunas 12 y 11, considerando las variables de superficie cubierta, superficie total y precio. Debido a que estas variables no cumplen con el supuesto de multinormalidad, se decidió aplicar una transformación logarítmica.
+
+```{r lda variables originales}
+# Filtrar las comunas para hacer analisis discriminante
+comunas_interes <- c(12, 11)
+# Transformacion de variables
+df$log_price <- log(df$price)
+df$log_surface_total <- log(df$surface_total)
+df$log_surface_covered<-log(df$surface_covered)
+# Analisis con variables originales
+df_ad <- df %>% select(surface_total,surface_covered, price,comuna1)%>%
+  filter(comuna1 %in% comunas_interes) %>%
+  mutate(comuna1 = factor(comuna1))
+```
+
+```{r}
+set.seed(214)#setear la semilla
+
+df_split <- initial_split(df_ad,
+                          prop = 0.85,
+                          strata = comuna1)#para conservar la proporción de las clases
+
+df_train_ad <- df_split |> 
+              training() |> 
+              mutate(across(where(is.numeric), scale))
+
+df_test_ad <- df_split |> 
+              testing()|> 
+              mutate(across(where(is.numeric), scale))
+
+# Número de datos en test y train
+paste0("Total del dataset de entrenamiento: ", nrow(df_train_ad))
+```
+
+```{r}
+paste0("Total del dataset de testeo: ", nrow(df_test_ad))
+```
+
+```{r}
+comuna12<- subset(df_train_ad[,1:3], df_train_ad$comuna1 == 12)
+comuna11<- subset(df_train_ad[,1:3], df_train_ad$comuna1 == 11)
+
+```
+
+## 9.2 Supuestos
+
+### 9.2.1 Normalidad
+
+```{r Normalidad _LDA}
+
+mvShapiro.Test(as.matrix(comuna12))
+```
+
+```{r Normalidad_LDA2}
+mvShapiro.Test(as.matrix(comuna11))
+```
+
+-   Dado que no se cumple se procede a transformar las variables originales.
+
+```{r lda variables transformadas}
+# Filtrar las comunas para hacer analisis discriminante
+comunas_interes <- c(12, 11)
+# Transformacion de variables
+df$log_price <- log(df$price)
+df$log_surface_total <- log(df$surface_total)
+df$log_surface_covered<-log(df$surface_covered)
+# Analisis con variables transformadas
+df_ad <- df %>% select(log_surface_total,log_surface_covered, log_price,comuna1)%>%
+  filter(comuna1 %in% comunas_interes) %>%
+  mutate(comuna1 = factor(comuna1))
+```
+
+```{r}
+set.seed(214)#setear la semilla
+
+df_split <- initial_split(df_ad,
+                          prop = 0.85,
+                          strata = comuna1)#para conservar la proporción de las clases
+
+df_train_ad <- df_split |> 
+              training() |> 
+              mutate(across(where(is.numeric), scale))
+
+df_test_ad <- df_split |> 
+              testing()|> 
+              mutate(across(where(is.numeric), scale))
+
+# Número de datos en test y train
+paste0("Total del dataset de entrenamiento: ", nrow(df_train_ad))
+```
+
+```{r}
+paste0("Total del dataset de testeo: ", nrow(df_test_ad))
+```
+
+```{r}
+comuna12<- subset(df_train_ad[,1:3], df_train_ad$comuna1 == 12)
+comuna11<- subset(df_train_ad[,1:3], df_train_ad$comuna1 == 11)
+
+```
+
+Vuelvo analizar Normalidad
+
+```{r Normalidad _LDA_log}
+
+mvShapiro.Test(as.matrix(comuna12))
+```
+
+```{r Normalidad_LDA2_log}
+mvShapiro.Test(as.matrix(comuna11))
+```
+
+-   *Se cumple el supuesto normalidad* utilizando las variables transformadas, ya que en ambos test de Shapiro-Wilks no se rechaza Ho.
+
+### 9.2.2 Independencia de las observaciones
+
+Viene dada por el diseño.
+
+### 9.2.3 Homocedasticidad
+
+-   Hipotesis (Ho): las matrices de varianzas-covarianzas de los grupos son iguales.
+
+```{r Homocedasticidad_LDA}
+# Realizar la prueba de Box's M
+boxM_result <- boxM(df_train_ad[, 1:3], df_train_ad$comuna1)
+
+# Ver los resultados
+print(boxM_result)
+```
+
+-   Dado que el valor p es mayor al nivel de significancia. *Se cumple el supuesto homogeneidad de varianza.*
+
+## 9.3 Analisis y Coeficientes de los discriminantes lineales:
+
+```{r Modelo LDA}
+model_lda <- lda(comuna1~., data =df_train_ad)
+model_lda
+```
+
+-   Estos coeficientes indican la contribución relativa de cada variable predictora al primer discriminante lineal. `LD1` es una combinación lineal de las variables predictoras que maximiza la separación entre los grupos.
+
+    -   log_surface_covered: -1.348
+
+    -   log_surface_total: -0.069
+
+    -   log_price: 1.401
+
+    **LD1=−1.34767334⋅log_surface_total−0.06893485⋅log_surface_covered+1.40122333⋅log_price**
+
+-   Las funciones discriminantes son combinaciones lineales (o ejes) que se construyen para separar los grupos basados en las variables predictoras. Se puede tener hasta tantas funciones discriminantes como grupos menos uno. En este caso, al tener dos grupos ( comuna=11 y comuna 12), se obtiene una única función discriminante que maximiza la separación entre ellos.
+
+```{r}
+prop = model_lda$svd^2/sum(model_lda$svd^2)
+prop #varianza entre grupos explicada por cada FD
+
+```
+
+-   El valor de 1 que se obtiene para la proporción de varianza explicada por cada función discriminante (FD) en en LDA) indica que esta única función discriminante captura toda la diferencia o variabilidad entre tus dos grupos (`comuna1 = 11` y `comuna1 = 12`). Este resultado es esperado y válido cuando solo hay dos grupos en el análisis discriminante.
+
+## 9.4 Predicción del modelo en df_test
+
+```{r}
+predictions <- model_lda |>  
+                predict(df_test_ad)
+predictions
+```
+
+## 9.5 Matriz de confusión
+
+### 9.5.1 En df_train
+
+```{r MC train LDA}
+cm_lda<-table(predict(model_lda,type="class")$class,df_train_ad$comuna1)
+```
+
+```{r}
+# Calcular la precisión
+accuracy <- sum(diag(cm_lda)) / sum(cm_lda)
+print(paste("Accuracy:", round(accuracy, 3)))
+```
+
+```{r Parti}
+partimat (comuna1~. , data=df_train_ad , method="lda")
+```
+
+### 9.5.2 En df_test
+
+```{r}
+lda.test <- predict(model_lda,df_test_ad)
+df_test_ad$lda <- lda.test$class
+cm_lda_t<-table(df_test_ad$lda,df_test_ad$comuna1)#matriz confusion test
+cm_lda_t
+```
+
+```{r}
+accuracy_lda_test <- sum(diag(cm_lda_t)) / sum(cm_lda_t)
+print(paste("Accuracy:", round(accuracy_lda_test, 3)))
+```
+
+-   **Desempeño en el Conjunto de Entrenamiento (Train Accuracy = 0.881)**:
+
+    -   El modelo tiene una alta precisión en el conjunto de datos en el que fue entrenado, clasificando correctamente el 88.1% de las observaciones.
+
+    -   Este alto valor puede indicar que el modelo ha aprendido bien las características de los datos de entrenamiento, pero también puede ser una señal de sobreajuste (overfitting) si la precisión es significativamente menor en el conjunto de prueba.
+
+-   **Desempeño en el Conjunto de Prueba (Test Accuracy = 0.583)**:
+
+    -   La precisión en el conjunto de prueba es del 58.3%, lo cual es considerablemente más bajo que en el conjunto de entrenamiento.
+
+    -   Este resultado puede indicar que el modelo no generaliza bien a datos nuevos o no vistos durante el entrenamiento. Es decir, aunque el modelo puede clasificar bien las observaciones del conjunto de entrenamiento, tiene dificultades para hacerlo en el conjunto de prueba.
+
+# 10. Clasificación Supervisada
+
+Aplique otro método de clasificación supervisada sobre los datos utilizados en el punto 9 y compare los resultados respecto a la metodología utilizada en el punto anterior.
+
+## 10.1 K-Nearest Neighbors (KNN)
+
+```{r}
+# Convertir tibble a data.frame
+df_train_knn <- as.data.frame(df_train_ad)
+df_test_knn <-as.data.frame(df_test_ad[-5])
+```
+
+```{r Modelo knn}
+
+# Defino modelo knn
+set.seed(214)
+task <- makeClassifTask(data = df_train_knn, target = "comuna1") 
+lrn_knn <- makeLearner("classif.knn", predict.type = "response",par.vals = list("k" = 2))
+mod_knn <- mlr::train(lrn_knn, task)
+
+```
+
+```{r knn_prediccion_test}
+# Predicción TEST
+pred_knn<- predict(mod_knn, newdata = df_test_knn)
+pred_knn
+acc_knn <- round(measureACC(as.data.frame(pred_knn)$truth, as.data.frame(pred_knn)$response),3)
+acc_knn
+
+
+```
+
+```{r matriz confusion}
+# Obtener y visualizar la matriz de confusión
+conf_matrix <- calculateConfusionMatrix(pred_knn)
+print(conf_matrix)
+```
+
+```{r}
+# Predicción TRAIN (naive)
+pred_knn1 = predict(mod_knn, newdata = df_train_knn) # por si quiero ver naive sobre training
+acc_knn1 <- round(measureACC(as.data.frame(pred_knn1)$truth, as.data.frame(pred_knn1)$response),3)
+pred_knn1
+acc_knn1
+
+
+```
+
+```{r analisis con distintos k, warning=FALSE}
+# Cambio los k
+acc=NULL
+acc2=NULL
+ks = seq(1,67,1)
+for (i in 1:length(ks)) {
+        lrn_knn = makeLearner("classif.knn", predict.type = "response",par.vals = list("k" = i)) 
+        mod_knn = mlr::train(lrn_knn, task)
+        pred_knn= predict(mod_knn, newdata = df_test_knn)
+        acc[i] = measureACC(as.data.frame(pred_knn)$truth, as.data.frame(pred_knn)$response)
+        pred_knn_ = predict(mod_knn, newdata = df_train_knn) # por si quiero ver naive sobre training
+        acc2[i] = measureACC(as.data.frame(pred_knn_)$truth, as.data.frame(pred_knn_)$response)
+        
+}
+        
+par(mfcol = c(1,2))
+
+new_df1 <- as.data.frame(cbind(ks,acc))
+new_df1 <- new_df1%>%mutate(sub_data='test')
+new_df2 <- as.data.frame(cbind(ks,acc2))
+colnames(new_df2) <- c('ks','acc')
+new_df2 <- new_df2%>%mutate(sub_data='train')
+
+new_df <- as.data.frame(rbind(new_df1,new_df2))
+new_df1[which.max(new_df1$acc),"ks"] 
+new_df2[which.max(new_df2$acc),"ks"] 
+
+# Encontrar el mejor valor de 'k' y 'threshold'
+best_k_test <- new_df1[which.max(new_df1$acc), "ks"]
+best_k_train <- new_df2[which.max(new_df2$acc), "ks"]
+
+print(paste("Mejor k_test:", best_k_test))
+print(paste("Mejor K_train:", best_k_train))
+```
+
+```{rgrafico variacionion, kkn}
+# Gráfco de cómo varía la métrica de performance accuracy, de acuerdo al umbral elegido
+
+ggplot(new_df, aes(x = ks, y = acc, color = sub_data)) +
+  geom_line() +
+  geom_point() +
+  labs(title = "Precisión del Modelo KNN para Diferentes Valores de k",
+       x = "Valor de k",
+       y = "Métrica de performance (accuracy)") +
+  labs(color='Conjunto de\n evaluación',linetype='Conjunto de\n evaluación')+
+  theme_minimal()+
+ scale_x_continuous(breaks = seq(1, 67, by = 10))  # Cambiar etiquetas del eje X
+                     
+ 
+
+```
+
+```{r Metricas de knn}
+# Métricas del modelo de knn
+Métrica <- c('valor','datos')
+Accuracy <- c(acc_knn,'prueba')
+Accuracy. <- c(acc_knn1,'entrenamiento')
+# Imprimo resultados de métricas de performance
+kable(rbind(Métrica, Accuracy, Accuracy.))
+```
+
+```{r Grafico knn}
+lrn_knn = makeLearner("classif.knn", predict.type = "response",par.vals = list("k" = 2)) 
+plotLearnerPrediction(lrn_knn,task,features = c("log_surface_covered", "log_surface_total"),cv=100L,gridsize=100)+scale_fill_manual(values=c("#ff0061","#11a6fc"))+theme_bw()
+```
+
+-   Al comparar estos métodos de clasificación, observamos que los resultados de accuracy son similares. Para el conjunto de datos de prueba, el LDA obtuvo un accuracy de 0.583, mientras que KNN alcanzó 0.5. En cuanto al conjunto de entrenamiento, LDA mostró un accuracy de 0.806 frente al 0.881 de KNN.
+
+-   Aunque ambos métodos muestran resultados de precisión comparables, es importante considerar otros aspectos además del accuracy. Por ejemplo, el KNN parece desempeñarse ligeramente mejor en el conjunto de entrenamiento, mientras que el LDA lo hace mejor en el conjunto de prueba. Además, factores como la interpretación de las predicciones, la eficiencia computacional y la facilidad de ajuste de hiperparámetros también pueden influir en la elección del método más adecuado para un problema específico
